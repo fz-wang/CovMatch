@@ -11,10 +11,20 @@ import math
 import shlex
 import tempfile
 import getpass
+import re
+from pathlib import Path
 
-gaussian_path = "/home/fzwang/install/gaussian16/g16/g16"
-rosetta_path = "/home/fzwang/rosetta_bin_linux_2020.25.61318_bundle"
-rosetta_python = os.environ.get("ROSETTA_PYTHON", "/home/fzwang/miniconda3/envs/py2/bin/python")
+gaussian_path = os.environ.get("GAUSSIAN_BIN", shutil.which("g16") or "g16")
+rosetta_path = os.environ.get("ROSETTA_ROOT", "")
+rosetta_python = os.environ.get("ROSETTA_PYTHON", "python2")
+
+
+def rosetta_params_scripts():
+    if not rosetta_path:
+        fail("Set --rosetta-root or ROSETTA_ROOT to the Rosetta bundle directory.")
+    root = Path(rosetta_path).resolve()
+    main = root if root.name == "main" else root / "main"
+    return main / "demos/public/using_ncaas_protein_peptide_interface_design/HowToMakeResidueTypeParamFiles/scripts"
 
 COVALENT_TARGETS = ("CYS", "LYS", "HIS", "TYR")
 CAP_IGNORE_ATOM_IDS = (2, 3, 4, 5, 6, 8, 9, 10, 11, 12)
@@ -293,6 +303,8 @@ def remove_conect_lines_from_pdb(pdb_filepath):
 
 #提交gaussian作业
 def gaussian_environment_prefix():
+    global gaussian_path
+    gaussian_path = os.path.abspath(shutil.which(gaussian_path) or gaussian_path)
     gaussian_dir = os.path.dirname(gaussian_path)
     gaussian_root = os.path.dirname(gaussian_dir)
     gaussian_profile = os.path.join(gaussian_dir, 'bsd', 'g16.profile')
@@ -491,9 +503,10 @@ def generate_gaussian_input(filepaths, output_dir, system_charge, submit=True):
 
 #检查函数，用以监督Gaussian作业是否结束运行
 def is_gaussian_job_completed(log_filepath):
-    with open(log_filepath, 'r') as file:
-        lines = file.readlines()
-    return any("Normal termination" in line for line in lines)
+    text = Path(log_filepath).read_text(errors="replace")
+    # The last calculation must finish; an earlier successful Link1 is insufficient.
+    events = list(re.finditer(r"Normal termination|Error termination|Entering Gaussian System|Entering Link 1\s*=|--Link1--|(?:Standard|Input|Z-Matrix) orientation:", text))
+    return bool(events and events[-1].group() == "Normal termination")
 
 def is_resp_gaussian_job_completed(log_filepath):
     """Return True only for a completed RESP charge Gaussian log."""
@@ -502,7 +515,7 @@ def is_resp_gaussian_job_completed(log_filepath):
     with open(log_filepath, 'r') as file:
         text = file.read()
     return (
-        "Normal termination" in text
+        is_gaussian_job_completed(log_filepath)
         and ("Pop=MK" in text or "HF/6-31G" in text)
     )
 
@@ -815,11 +828,11 @@ def molfile_to_params(mol_filepath, name):
     if shutil.which(rosetta_python) is None:
         fail(f"Cannot find Rosetta params Python interpreter '{rosetta_python}'. Install python2 or set ROSETTA_PYTHON to the correct interpreter path.")
 
-    rosetta_script = f"{rosetta_path}/main/demos/public/using_ncaas_protein_peptide_interface_design/HowToMakeResidueTypeParamFiles/scripts/molfile_to_params_polymer.py"
+    rosetta_script = str(rosetta_params_scripts() / "molfile_to_params_polymer.py")
     if not os.path.exists(rosetta_script):
         fail(f"Required Rosetta params script is missing: {rosetta_script}")
 
-    command = f"{rosetta_python} {rosetta_script} -n {name} --polymer {mol_filepath}"
+    command = shlex.join([rosetta_python, rosetta_script, "-n", name, "--polymer", mol_filepath])
     run_command(command, f"Generate Rosetta params for {mol_filepath}", capture_output=True)
     if not os.path.exists(params_filepath):
         fail(f"Rosetta params command finished but expected file is missing: {params_filepath}")
@@ -841,11 +854,12 @@ def molfile_to_params_temps(mol_filepath, name):
     if shutil.which(rosetta_python) is None:
         fail(f"Cannot find Rosetta params Python interpreter '{rosetta_python}'. Install python2 or set ROSETTA_PYTHON to the correct interpreter path.")
 
-    rosetta_script = f"{rosetta_path}/main/demos/public/using_ncaas_protein_peptide_interface_design/HowToMakeResidueTypeParamFiles/scripts/molfile_to_params_polymer_modify.py"
+    rosetta_script = str(Path(__file__).resolve().parent / "rosetta/molfile_to_params_polymer_modify.py")
     if not os.path.exists(rosetta_script):
         fail(f"Required no-reorder Rosetta params script is missing: {rosetta_script}")
 
-    command = f"{rosetta_python} {rosetta_script} -n {name}_temps --no_reorder --polymer {mol_filepath}"
+    command = ("ROSETTA_PARAMS_SCRIPTS=" + shlex.quote(str(rosetta_params_scripts())) + " " +
+               shlex.join([rosetta_python, rosetta_script, "-n", name + "_temps", "--no_reorder", "--polymer", mol_filepath]))
     run_command(command, f"Generate no-reorder temp Rosetta params for {mol_filepath}", capture_output=True)
     if not os.path.exists(params_filepath):
         fail(f"Rosetta temp params command finished but expected file is missing: {params_filepath}")
@@ -2290,7 +2304,11 @@ if __name__ == '__main__':
                         help='Whether the SMILES is a free amino acid or an ACE-NCAA-NME capped model (default: auto).')
     parser.add_argument('--chirality', choices=['auto', 'L', 'D'], default='auto',
                         help='Polymer chirality override. Recommended for capped SMILES because @/@@ depends on atom order.')
+    parser.add_argument('--gaussian-bin', default=gaussian_path, help='Gaussian g16 executable.')
+    parser.add_argument('--rosetta-root', default=rosetta_path, help='Rosetta bundle or main directory.')
+    parser.add_argument('--rosetta-python', default=rosetta_python, help='Python 2 interpreter for Rosetta helper scripts.')
     args = parser.parse_args()
+    gaussian_path, rosetta_path, rosetta_python = args.gaussian_bin, args.rosetta_root, args.rosetta_python
     main(
         args.input,
         args.names,
